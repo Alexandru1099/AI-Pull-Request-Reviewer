@@ -1,215 +1,179 @@
-## Repo-Aware AI Pull Request Reviewer
+# Repo-Aware AI Pull Request Reviewer
 
-Phase 1: infrastructure scaffold for a repo-aware AI PR reviewer.  
-This phase sets up a production-minded monorepo with a typed Next.js frontend and a FastAPI backend, plus Docker Compose and a Makefile for local orchestration. **No GitHub or AI logic is implemented yet.**
+> A full-stack AI system that reviews GitHub pull requests with **full repository context** — not just the diff.
+
+Built with a RAG pipeline, structured LLM output, real-time observability, and GitHub OAuth. Designed for teams that want AI code review grounded in how the codebase actually works.
+
+---
+
+## Demo
+
+### Landing & PR Input
+![Landing](./docs/landing.png)
+
+### AI Review Dashboard
+![Dashboard](./docs/dashboard.png)
+
+### AI Observability & Issue Detail
+![Observability](./docs/observability.png)
 
 ---
 
-### Architecture
+## How it works
 
-- **Monorepo layout**
-  - `frontend/`: Next.js (App Router) + TypeScript + Tailwind, minimal landing page
-  - `backend/`: FastAPI + Pydantic, `GET /health` endpoint
-  - Root tooling: `docker-compose.yml`, `Makefile`, `.env.example`
+Most AI PR reviewers see only the diff. This one retrieves relevant files from the repository, embeds them into a vector store, and feeds that context to the LLM alongside the diff — so the review is grounded in the actual codebase.
 
-- **Backend**
-  - FastAPI app in `backend/app`
-  - `GET /health` returns a typed JSON health object
-  - Config managed via environment variables (`app/core/config.py`)
-
-- **Frontend**
-  - Entry page at `/` showing project title and description
-  - Tailwind configured and ready for future shadcn/ui components
-  - Global config via `src/lib/config.ts`
+```
+GitHub PR URL
+     │
+     ▼
+┌─────────────────────────────────────────────┐
+│  1. Fetch PR metadata + changed files       │  GitHub API
+│  2. Chunk + embed repository files          │  sentence-transformers
+│  3. Retrieve top-K relevant chunks          │  ChromaDB vector search
+│  4. Build structured prompt                 │
+│  5. LLM call → validated JSON output        │  OpenAI GPT-4.1-mini
+│  6. Return issues, score, token usage       │
+└─────────────────────────────────────────────┘
+```
 
 ---
+
+## Architecture
+
+```
+.
+├── backend/                    # FastAPI
+│   └── app/
+│       ├── api/routes/         # /review/analyze, /review/pr-preview, /auth
+│       ├── services/           # LLM orchestration, GitHub OAuth, session
+│       ├── chunker.py          # File chunking strategy
+│       ├── embeddings.py       # sentence-transformers embedding
+│       ├── vector_store.py     # ChromaDB interface
+│       ├── retriever.py        # RAG retrieval pipeline
+│       ├── llm_review.py       # Structured prompt + OpenAI call + retry
+│       ├── diff_parser.py      # Unified diff parser
+│       └── repo_fetcher.py     # GitHub file tree fetcher
+└── frontend/                   # Next.js 14 (App Router)
+    └── src/
+        ├── app/
+        └── components/         # Review dashboard, PR form, GitHub auth panel
+```
+
+### Key design decisions
+
+| Decision | Rationale |
+|---|---|
+| ChromaDB + sentence-transformers | Self-contained vector search, no external infra required |
+| Pydantic-validated LLM output | Structured JSON with automatic retry on schema mismatch |
+| `USE_MOCK_REVIEW` flag | Switch between heuristic and live LLM without redeploying |
+| `@lru_cache` on settings | Single settings parse per process; hot-reload via restart |
+| httpOnly session cookies | GitHub tokens stay server-side, never exposed to frontend |
+
+---
+
+## Stack
+
+**Backend**
+- Python 3.11 · FastAPI · Pydantic v2
+- OpenAI SDK (GPT-4.1-mini, structured output)
+- sentence-transformers (local embeddings)
+- ChromaDB (in-process vector store)
+- httpx (async GitHub API client)
+
+**Frontend**
+- Next.js 14 (App Router) · TypeScript · Tailwind CSS
+
+**Infrastructure**
+- Docker Compose · Makefile
+
+---
+
+## AI Observability
+
+Every review exposes full runtime metadata:
+
+- Model name and version
+- Latency (ms)
+- Prompt / completion / total tokens
+- Estimated cost (USD)
+- Chunks retrieved and top files used
+- Review mode (`repository-aware` vs `mock-heuristic`)
+
+User-labeled evaluation metrics (correct / false positive) are tracked per issue for future fine-tuning data collection.
+
+---
+
+## Setup
 
 ### Prerequisites
 
-- Node.js 18+ (Node 20+ recommended)
-- Yarn (or adapt commands for `npm`/`pnpm`)
 - Python 3.11+
-- Docker and Docker Compose (for containerised dev)
+- Node.js 20+ and Yarn
+- Docker + Docker Compose
 
----
-
-### Environment setup
-
-From the repo root:
+### Environment
 
 ```bash
 cp .env.example .env
-
-cd backend
-cp .env.example .env
-cd ..
-
-cd frontend
-cp .env.example .env
-cd ..
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
 ```
 
-You can adjust ports and URLs in these `.env` files as needed.
+Set the following in `backend/.env`:
 
----
+```env
+OPENAI_API_KEY=sk-...
+USE_MOCK_REVIEW=false
 
-### Backend: local development
+# Optional: GitHub OAuth for private repo access
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+GITHUB_OAUTH_REDIRECT_URI=http://localhost:8000/api/auth/github/callback
+SESSION_SECRET=<random-string-32-chars-min>
+```
 
-Create a virtual environment and install dependencies:
+### Run with Docker
 
 ```bash
-cd backend
-
-# Option A: using uv (if installed)
-uv sync
-
-# Option B: using venv + pip
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Run the FastAPI server:
-
-```bash
-# From backend/
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Verify the health endpoint:
-
-- Open `http://localhost:8000/health` in your browser, or
-- Use curl:
-
-  ```bash
-  curl http://localhost:8000/health
-  ```
-
-Expected response (shape):
-
-```json
-{
-  "status": "ok",
-  "service": "repo-aware-reviewer-backend",
-  "timestamp": "2026-03-17T00:00:00Z"
-}
-```
-
-(Timestamp will vary.)
-
----
-
-### Frontend: local development
-
-Install dependencies and run dev server:
-
-```bash
-cd frontend
-yarn install
-yarn dev
-```
-
-Visit `http://localhost:3000` in your browser.
-
-You should see the landing page titled:
-
-> **Repo-Aware AI Pull Request Reviewer**
-
-with a short description and a small checklist of what Phase 1 provides.
-
----
-
-### Using Docker Compose
-
-From the repo root:
-
-```bash
-# Build and start both services
 make up
-# or
-docker-compose up --build
 ```
 
-- Frontend: `http://localhost:3000`
-- Backend: `http://localhost:8000/health`
+- Frontend: http://localhost:3000
+- Backend: http://localhost:8000/health
 
-Stop services:
+### Run locally
 
 ```bash
-make down
-# or
-docker-compose down
+# Backend
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+
+# Frontend (separate terminal)
+cd frontend
+yarn install && yarn dev
 ```
 
-Tail logs:
+---
 
-```bash
-make logs
-```
+## API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/review/pr-preview` | Fetch PR metadata from GitHub |
+| `POST` | `/api/review/analyze` | Run full RAG + LLM review |
+| `GET` | `/api/auth/github/login` | Start GitHub OAuth flow |
+| `GET` | `/api/auth/github/callback` | OAuth callback |
+| `GET` | `/health` | Health check |
 
 ---
 
-### Run commands summary
+## GitHub OAuth
 
-From repo root:
-
-- **Frontend dev**: `make frontend-dev`
-- **Backend dev**: `make backend-dev`
-- **Compose up**: `make up`
-- **Compose down**: `make down`
-- **Compose logs**: `make logs`
-
----
-
-### Verification checklist (Phase 1)
-
-1. **Backend health**
-   - [ ] Run `make backend-dev` (or `uvicorn app.main:app --reload` from `backend/`)
-   - [ ] Visit `http://localhost:8000/health`
-   - [ ] Confirm JSON with `"status": "ok"` and `"service": "repo-aware-reviewer-backend"`
-
-2. **Frontend landing page**
-   - [ ] Run `make frontend-dev` (or `yarn dev` from `frontend/`)
-   - [ ] Visit `http://localhost:3000`
-   - [ ] Confirm:
-     - The title `Repo-Aware AI Pull Request Reviewer`
-     - A short descriptive subtitle
-     - A section describing Phase 1 readiness
-
-3. **Docker Compose**
-   - [ ] Run `make up`
-   - [ ] Visit `http://localhost:8000/health` and `http://localhost:3000`
-   - [ ] Confirm both services respond as above
-   - [ ] Run `make down` to stop containers
-
----
-
-### Future phases
-
-Phase 1 intentionally **does not** implement:
-
-- GitHub authentication or webhooks
-- Pull request inspection or diff analysis
-- Any AI or LLM calls
-
-Those will be added in later phases on top of this scaffold.
-
----
-
-### GitHub OAuth Security Notes
-
-- GitHub OAuth uses the OAuth App flow with a signed `state` cookie to mitigate CSRF during callback handling.
-- Session cookies are configured as `httpOnly`, `sameSite=lax`, and `secure` in production environments.
-- GitHub access tokens are kept server-side only and are never returned to the frontend API payloads.
-- Session state is currently stored in-memory on the backend process. This is acceptable for local development and a single-instance deployment, but it is not a durable multi-instance session store.
-- Session expiry is enforced server-side through `AUTH_SESSION_TTL_SECONDS`.
-- OAuth state expiry is enforced through `AUTH_STATE_TTL_SECONDS`.
-- Secrets such as `GITHUB_CLIENT_SECRET` and `SESSION_SECRET` must be provided via environment variables.
-- The current integration is read-oriented and intended for repository and pull request access only. It does not perform write actions on GitHub resources.
-- Security assumptions and limitations:
-  - a single backend instance owns the in-memory session state
-  - logout and session expiration clear local session state only
-  - rotating GitHub tokens or restarting the backend invalidates active sessions
-
-# AI-Pull-Request-Reviewer
-# AI-Pull-Request-Reviewer
+- OAuth App flow with signed `state` cookie (CSRF protection)
+- Session cookies: `httpOnly`, `sameSite=lax`, `secure` in production
+- Access tokens are never returned to the frontend
+- Read-only scope: `read:user repo`
+- In-memory session store (single-instance)
